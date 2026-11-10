@@ -1,0 +1,12 @@
+{
+  "parent": "minecraft:block/cube",
+  "textures": {
+    "down": "restrictions:block/side",
+    "east": "restrictions:block/side",
+    "north": "restrictions:block/attractor",
+    "particle": "restrictions:block/side",
+    "south": "restrictions:block/side",
+    "up": "restrictions:block/side",
+    "west": "restrictions:block/side"
+  }
+}

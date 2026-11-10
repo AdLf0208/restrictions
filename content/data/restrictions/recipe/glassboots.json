@@ -1,0 +1,17 @@
+{
+  "category": "misc",
+  "key": {
+    "G": "#c:glass_blocks",
+    "g": "#c:glass_panes"
+  },
+  "pattern": [
+    "   ",
+    "g g",
+    "G G"
+  ],
+  "result": {
+    "count": 1,
+    "id": "restrictions:glassboots"
+  },
+  "type": "minecraft:crafting_shaped"
+}

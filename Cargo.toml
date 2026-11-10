@@ -1,0 +1,16 @@
+[package]
+name = "horizon-restrictions"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+description = "Restrictions for Horizon: Attractor, Pusher and One Way entity movers"
+# Ported from: Restrictions 1.21-7.0.3 (McJtyMods/Restrictions, MIT),
+# Minecraft Java 1.21.1 NeoForge. Local-only port.
+
+[lib]
+path = "mixins/restrictions/runtime.rs"
+
+[workspace]
+members = ["tools/audit"]
+resolver = "2"

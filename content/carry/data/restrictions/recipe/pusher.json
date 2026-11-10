@@ -1,0 +1,18 @@
+{
+  "category": "misc",
+  "key": {
+    "P": "minecraft:piston",
+    "f": "minecraft:feather",
+    "r": "minecraft:redstone"
+  },
+  "pattern": [
+    "frf",
+    "rPr",
+    "frf"
+  ],
+  "result": {
+    "count": 1,
+    "id": "restrictions:pusher"
+  },
+  "type": "minecraft:crafting_shaped"
+}

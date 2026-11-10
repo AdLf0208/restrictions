@@ -1,0 +1,8 @@
+# Carried over from restrictions-1.21-7.0.3.jar by horizon-port-pack, for local use only.
+# Licence: MIT License https://github.com/McJtyMods/Restrictions/blob/1.21_neo/LICENSE
+id = "restrictions"
+name = "Restrictions"
+version = "1.21-7.0.3"
+api = "0.2"
+side = "both"
+capabilities = ["registries"]

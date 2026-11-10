@@ -1,0 +1,34 @@
+{
+  "mod_id": "restrictions",
+  "name": "Restrictions",
+  "version": "1.21-7.0.3",
+  "loader": "neoforge",
+  "license": "MIT License https://github.com/McJtyMods/Restrictions/blob/1.21_neo/LICENSE",
+  "verdict": "partly",
+  "summary": "4 blocks, 1 item port; not 1 renderer or model in code.",
+  "ports": [
+    "4 blocks",
+    "1 item",
+    "5 recipes",
+    "4 loot tables",
+    "8 textures",
+    "blocks take the closest vanilla block's shape, hardness and sounds"
+  ],
+  "skipped": [
+    "1 renderer or model in code"
+  ],
+  "depends": [
+    "mcjtylib"
+  ],
+  "namespaces": [
+    "restrictions"
+  ],
+  "code": {
+    "classes": 13,
+    "features": {
+      "renderer": 1
+    },
+    "events": [],
+    "examples": {}
+  }
+}

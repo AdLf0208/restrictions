@@ -1,0 +1,11 @@
+# Port-owned content-mod manifest for the carried Restrictions assets and data
+# (the port's `--dev-mod content` folder). The assets/data are the verified
+# carry of `ports/_shared/carry-work/restrictions/restrictions-1.21-7.0.3.jar`,
+# hand-patched as recorded in README.md.
+# Licence: MIT (McJty, https://github.com/McJtyMods/Restrictions).
+id = "restrictions"
+name = "Restrictions"
+version = "1.21-7.0.3"
+api = "0.2"
+side = "both"
+capabilities = ["registries"]
