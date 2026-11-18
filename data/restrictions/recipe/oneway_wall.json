@@ -1,0 +1,18 @@
+{
+  "category": "misc",
+  "key": {
+    "P": "#c:glass_blocks",
+    "f": "#c:slimeballs",
+    "r": "minecraft:redstone"
+  },
+  "pattern": [
+    "frf",
+    "rPr",
+    "frf"
+  ],
+  "result": {
+    "count": 1,
+    "id": "restrictions:oneway_wall"
+  },
+  "type": "minecraft:crafting_shaped"
+}

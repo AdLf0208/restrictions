@@ -1,0 +1,6 @@
+{
+  "model": {
+    "model": "restrictions:item/oneway_wall",
+    "type": "minecraft:model"
+  }
+}

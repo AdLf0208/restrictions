@@ -1,0 +1,18 @@
+{
+  "category": "misc",
+  "key": {
+    "P": "minecraft:sticky_piston",
+    "f": "minecraft:feather",
+    "r": "minecraft:redstone"
+  },
+  "pattern": [
+    "frf",
+    "rPr",
+    "frf"
+  ],
+  "result": {
+    "count": 1,
+    "id": "restrictions:attractor"
+  },
+  "type": "minecraft:crafting_shaped"
+}
