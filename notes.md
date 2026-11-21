@@ -1,4 +1,4 @@
-# Restrictions — port notes (slice 1, migrated to the SDK format)
+# Restrictions — port notes (slice 2: every entity, not only mobs)
 
 Ported from **Restrictions 1.21-7.0.3** (`McJtyMods/Restrictions` @ `fbc351c0`, MIT) for
 Minecraft Java 1.21.1 NeoForge. Clean-room Rust rewrite from the mod's behaviour; the upstream
@@ -10,15 +10,101 @@ campaign pin.
 (ARCHITECTURE.md §8); publishable under MIT with this source. `LICENSE` (upstream's own text) and
 `LICENSE-NOTICE.md` (provenance) travel **inside** the `.hmod`.
 
-**Format: the SDK package (2026-11-18).** This port was migrated from the retired `.hnmod`
-container + embedded content archive to one flat `.hmod` — code, assets and data in the same
-package. See [§Migration to the SDK format](#migration-to-the-sdk-format).
-`src/runtime.rs` is **byte-identical** to the retired `mixins/restrictions/runtime.rs`
-(sha256 `ab17fee28196747dfdaf94092e59a41c5d25e2b7e3c43219aee033a76b2ced35`), including the file
-inside the built package.
+**Format: the SDK package (2026-11-18).** This port is one flat `.hmod` — code, assets and data in
+the same package. See [§Migration to the SDK format](#migration-to-the-sdk-format).
 
-**Version 0.2.0** supersedes PR **#877** (closed on 2026-11-18 by the `.hnmod` format purge); the
-changelog is at the end of this file.
+**Version 0.2.3** is slice 2 ([§Slice 2](#slice-2--the-sweep-is-every-entity-not-only-mobs)): the
+Attractor and Pusher move **every** entity in their run, not only mobs, at the campaign pin
+`0a875da`, and the two movers' loot tables lose a component that cannot exist at 26.3. It follows
+0.2.1 (PR #1181 review fixes) and supersedes PR **#877** (closed on 2026-11-18 by the `.hnmod`
+format purge); the changelog is at the end of this file.
+
+## Slice 2 — the sweep is every entity, not only mobs
+
+**The gap it closes** (`notes.md` 0.2.1 §Gaps, item 3, verbatim):
+
+> **Item entities and arrows/boats/orbs** are out of this slice's mob filter. The host can now
+> move item entities (`LevelRef::all_entities` + `EntityRef::push`); a later slice should widen
+> the filter and prove it in game.
+
+Upstream sweeps **every `Entity`**: `getEntitiesOfClass(Entity.class, …)` at
+`BaseTileEntity.java:70` "includes items, arrows, boats, minecarts, TNT, orbs"
+(`ports/_shared/upstream/restrictions/FINDINGS.md:97-99`). 0.1.0/0.2.x filtered with
+`host.mob(entity)` because the retired hook could move only mobs; the pin's `EntityRef::push`
+moves any simulated non-player entity, so the filter had become a fidelity defect. The tier is
+unchanged (`logic`): the same tick, run, impulse and budget — only the sweep's eligibility moves.
+
+**The red (before the fix), verbatim.** The new e2e phase run against the **delivered 0.2.1
+package, no rebuild** (`~/.cache/horizon-e2e/0b14f8a/restrictions`, log
+`evidence/restrictions-e2e/e2e-red-0.2.1.log`):
+
+```
+before: ItemMe=3.5 ItemControl=3.5 OrbMe=5.5 OrbControl=5.4964434695464
+sweep:  ItemMe=3.5..3.5 ItemControl=3.5..3.5
+sweep:  OrbMe=5.5..5.5 OrbControl=5.496434181463228..5.49755859375
+FAIL: the powered attractor did not pull the dropped item (before=3.5 min=3.5)
+EXIT:1
+```
+
+The unit test was written first and failed to compile, which is the red for the pure rule:
+
+```
+error[E0425]: cannot find function `sweeps` in this scope
+   --> src/runtime.rs:301:18
+error[E0425]: cannot find value `ENTITIES_PER_CELL` in this scope
+   --> src/runtime.rs:312:40
+```
+
+**The change.**
+
+- `runtime::sweeps(id, players) -> bool` — the sweep's one exclusion: a player. Everything else
+  whose box meets the run is pushed: a dropped stack, an arrow, a boat, an experience orb, a mob.
+  A skipped player spends none of the budget, and a later API that could move a player must not
+  make this port do so by accident.
+- `MOBS_PER_CELL` → `ENTITIES_PER_CELL` (the same four per powered cell now covers every kind);
+  `push_budget` is unchanged in behaviour.
+- `support::on_tick` reads `host.players().server_players()` once per mover tick, drops the
+  `host.mob` filter, and counts only a push the host **accepted** (`EntityRef::push` returns
+  false for a player or a kind it does not simulate), so a refused candidate never starves the
+  entities behind it.
+- Tests: `a_mover_sweeps_every_entity_except_a_player`,
+  `dropped_items_and_mobs_share_the_run_s_budget` (13 → 16 tests with the renamed budget test).
+
+**The green (in game, 0.2.3 at `0a875da`).** Two movers side by side in The End, one powered
+(z=-6) and one unpowered (z=-8), each with a dropped cobblestone and an experience orb in its run
+on a y=64 floor so both boxes sit on the y=65 run plane:
+
+```
+before: ItemMe=3.5 ItemControl=3.5 OrbMe=5.5 OrbControl=5.5
+sweep:  ItemMe=1.125..3.5 ItemControl=3.5..3.5
+sweep:  OrbMe=1.25..5.5 OrbControl=5.5..5.5
+PASS: the sweep moved a dropped item and an experience orb while the unpowered control stayed; …
+EXIT:0
+```
+
+The same scenario on the **same Nightly without the package** fails at the item assertion
+(`FAIL: the powered attractor did not pull the dropped item (before=3.5 min=3.5)`, `EXIT:1`), and
+`SELFTEST=1` — which inverts the item assertion — fails with
+`FAIL: selftest: the item in the powered run is asserted not to move (before=3.5 min=1.125)`,
+`EXIT:1`. Logs: `evidence/restrictions-e2e/e2e-launcher-0.2.3{,-control,-selftest,-selftest-recipe}.log`.
+
+## Recipes are crafted in game (parity rule, 2026-11-20)
+
+Every carried recipe is crafted from the data **inside the delivered package** by
+`tools/craft_recipes.py`: it reads `data/restrictions/recipe/*.json` out of the `.hmod`, lays each
+declared pattern (spaces included, as vanilla matches a shaped recipe) in a real crafting table,
+and asserts the result id and count, that every ingredient was consumed and that the grid is
+empty. A `#tag` ingredient is resolved by one table of concrete vanilla items; an unknown tag
+fails the run instead of being skipped. All five craft (attractor, pusher, oneway, oneway_wall,
+glassboots), each with `count: 1`.
+
+The phase is its own `--offscreen` launch: **a headless client never opens a crafting-table
+menu** (measured here — `ctl interact` clicks the table and the screen stays `inventory`, and
+`ctl screen` then times out; the same note is in `ports/pocketstorage/tools/e2e.sh:106-108`).
+`SELFTEST=recipe` makes the first recipe expect the second's result and must fail:
+`FAIL: attractor.json: expected 1 restrictions:glassboots, got {'count': 1, 'item':
+'restrictions:attractor', 'slot': 200}` + `EXIT:1`
+(`evidence/restrictions-e2e/e2e-launcher-0.2.3-selftest-recipe.log`).
 
 ## Approach (from the pin's `docs/modpacks.md`)
 
@@ -31,14 +117,15 @@ changelog is at the end of this file.
 - **Harness:** `tools/e2e.sh`, a headless The End scenario with an unpowered control lane, a
   box-membership pair, a placement-facing leg and a counterfactual/selftest switch.
 
-## What is implemented (slice 1)
+## What is implemented (slice 1: the movers; slice 2: their sweep)
 
 - **Attractor** and **Pusher**: the cells in front of the block, `pos + facing*1 …
   pos + facing*signal` (its own cell excluded), where `signal` is the strongest neighbouring
-  redstone signal (0 = off). Each server tick, every mob whose bounding box meets that run gets
-  `Entity.push(facing × ∓0.1)`: **−0.1** blocks/tick for the attractor (toward the block) and
-  **+0.1** for the pusher (away). An impulse added to the velocity, never a teleport; no
-  line-of-sight test (upstream has none).
+  redstone signal (0 = off). Each server tick, every entity whose bounding box meets that run
+  gets `Entity.push(facing × ∓0.1)`: **−0.1** blocks/tick for the attractor (toward the block)
+  and **+0.1** for the pusher (away). An impulse added to the velocity, never a teleport; no
+  line-of-sight test (upstream has none). Since slice 2 "every entity" is literally that: mobs,
+  dropped stacks, arrows, boats and experience orbs ([§Slice 2](#slice-2--the-sweep-is-every-entity-not-only-mobs)).
 - The two movers own block entity types `restrictions:attractor` / `restrictions:pusher`, which
   tick on the server; the facing comes from the block's `facing` property and the level from the
   level in place.
@@ -51,7 +138,7 @@ changelog is at the end of this file.
 |---|---|---|
 | `Hooks::register` | once, at startup | Declares `restrictions:attractor` (blocks: `restrictions:attractor`) and `restrictions:pusher`, attaches [`MoverPart`] to each, and [`Placement`] to all four carried blocks. |
 | `BlockEntityPart::block_entity_ticks` | Part, server, listen | `event.ticks = true` for the mover's own block. |
-| `BlockEntityPart::block_entity_tick` | Part, server, listen | Answers `BlockEntityTickReply::Unchanged` (the part writes no BE payload, so ticking alone must not dirty the chunk), then `support::on_tick`: read `facing`, read `LevelRef::best_neighbor_signal`, compute the run and push every mob whose box meets it. |
+| `BlockEntityPart::block_entity_tick` | Part, server, listen | Answers `BlockEntityTickReply::Unchanged` (the part writes no BE payload, so ticking alone must not dirty the chunk), then `support::on_tick`: read `facing`, read `LevelRef::best_neighbor_signal`, compute the run, read the level's players once (`server_players`), and push every entity whose box meets the run and is not a player. |
 | `BlockPart::state_for_placement` | Part, server, replace | `Some(Some(state))` with `facing` = `runtime::facing_for_yaw(context.yaw)`, `None` for any other block. |
 | `block_entity` (initial compound) | **not implemented** | A declared block entity type starts with an empty compound; the retired hook that answered `Some((block_id, Compound::new()))` has no job left. |
 
@@ -85,19 +172,32 @@ keeps `minecraft:glass`.
    glass boots gate exactly the client half. The port moves mobs only (players are
    client-authoritative); see the gap list.
 
+3. **The two movers' loot tables named `mcjtylib:item_energy`** (`loot_table/blocks/attractor.json`
+   and `pusher.json`: a `minecraft:copy_components` modifier with
+   `include: ["mcjtylib:item_energy", "minecraft:container"]`, generated by McJtyLib's block
+   template). That component belongs to McJtyLib, which is not part of this package and does not
+   exist at 26.3, so a real break copied nothing and **the block dropped nothing at all** —
+   measured: a stone-pickaxe break left `block=minecraft:air` and zero items, while
+   `loot give @s loot restrictions:blocks/attractor` (no block entity in the context) gave exactly
+   one. The port **drops the modifier** from both tables, matching the two glass blocks' tables
+   (which never had it); a break now drops one of the block with a pickaxe and one by hand, which
+   the e2e asserts. A user notices that a broken Attractor/Pusher can be picked up again. Worth an
+   upstream report; not filed.
+
 ## Deviations (deliberate)
 
-1. **Mobs only**, as in 0.1.0: the slice is filtered with `host.mob(entity)` so the behaviour is
-   exactly the verified one. The SDK's host can move any non-player entity
-   (`EntityRef::push`), so widening is a later slice, not this migration.
+1. ~~**Mobs only**~~ — **closed by slice 2 (0.2.2).** 0.1.0–0.2.1 filtered with
+   `host.mob(entity)`; the sweep now covers every entity the host can push
+   (`runtime::sweeps`), proven in game with a dropped item and an experience orb.
 2. **Membership is the entity's box** (`EntityRef::bounding_box` + `runtime::boxes_meet`), with
    the feet-cell test as the fallback for kinds without a box (the ender dragon), as upstream
    intersects boxes.
 3. **Placement** uses vanilla's yaw (`PlacementContext.yaw` → `runtime::facing_for_yaw`) rather
    than McJtyLib's two-block UP/DOWN special case: identical for ordinary placements, and the
    placer's height is not in `PlacementContext`.
-4. **No fall-distance reset** for `facing=up`: no mob fall-distance write at the pin, so an
-   upward lift can still deal fall damage.
+4. **No fall-distance reset** for `facing=up` yet: the pin now has
+   `ServerHost::entity_reset_fall_distance` (so the 0.1.0 "no write at the pin" note is stale),
+   but this slice does not use it — an upward lift can still deal fall damage until the next one.
 5. **No `powered` sync and no client half**: the redstone level is read from the world each tick
    instead of being synced to a client copy (upstream syncs it only to feed the client-side player
    push, which this slice does not have).
@@ -105,20 +205,54 @@ keeps `minecraft:glass`.
 ## Gaps
 
 - **One Way / One Way Wall have no behaviour.** Upstream's One Way is `noCollission()` and pushes
-  on `entityInside`; Horizon's content format couples outline and collision, has no per-entity
-  collision shape, and has no neutral no-collision template with a block entity. Both blocks are
-  placed and carried, and `oneway` orients on placement, but neither moves anything.
+  on `entityInside`, and the pin **does** have the hook (`BlockPart::entity_inside` with
+  `EntityWrite::Push`), but it only fires for an entity inside a block it already collides with:
+  the SDK's own note says the `getEntityInsideCollisionShape` that decides "inside" is not exposed
+  (`horizon-mod-vocab/src/hooks/notes.rs`, tracked upstream as #44), and `glassential` measured the
+  consequence at this pin (`entity_inside` fires only inside a block the entity collides with).
+  A no-collision content block therefore never fires it, and a solid one cannot be entered — the
+  upstream mechanic cannot be expressed. Both blocks are placed and carried, and `oneway` orients
+  on placement, but neither moves anything. One Way Wall is further blocked: its collision shape
+  depends on the entity's velocity, and no per-entity collision shape exists.
 - **Players** cannot be moved server-side: `EntityRef::push` refuses a player (its client moves
   it), and there is no player velocity or position write in the API. This is also why glass boots
-  have no observable effect here.
-- **Item entities and arrows/boats/orbs** are out of this slice's mob filter. The host can now
-  move item entities (`LevelRef::all_entities` + `EntityRef::push`); a later slice should widen
-  the filter and prove it in game.
-- **Fall-distance reset** for `facing=up` (above).
+  have no observable effect here. The sweep now skips a player explicitly and by test
+  (`runtime::sweeps`), so the budget stays for what can move.
+- ~~**Item entities and arrows/boats/orbs** are out of this slice's mob filter.~~ **Closed by
+  slice 2 (0.2.2)**: `EntityRef::push` moves them, `runtime::sweeps` includes them, and the e2e
+  proves a dropped stack and an experience orb are pulled while an unpowered control stays.
+- **Fall-distance reset** for `facing=up` (above). **Now implementable**: the pin has
+  `ServerHost::entity_reset_fall_distance(entity)` (the 0.1.0 note "no mob fall-distance write"
+  is stale), and upstream forces `fallDistance = 1.0` while a lifted entity's vertical velocity is
+  above −0.5 (`BaseTileEntity.java:73-75`). This is the next slice.
 - The **in-game e2e was not re-run** in this migration: it needs a game the launcher built with
   the mod (`horizon-launcher native-build …`), and `horizon-launcher` is not installed here. The
   0.1.0 run stands as the behaviour evidence for the identical scenario (see
   [§History](#history-010-and-earlier)); the transport changed, not the rules.
+
+### Coverage (parity rule, 2026-11-20)
+
+Every family the package ships, and where it is proven. `tested` names the e2e phase/assertion;
+the log is `evidence/restrictions-e2e/e2e-launcher-0.2.3.log` unless another is named.
+
+| Family (from the jar) | State | Proof |
+|---|---|---|
+| Attractor pull (run = `signal` cells, ±0.1/tick, off at 0) | tested | `sweep` phase (item + orb pulled west), `PullMe` cow lane (`1.503` from `3.5`) |
+| Pusher push (opposite sign) | tested | `PushMe` cow lane (`11.55` from `3.5`) |
+| Unpowered control (signal 0 does nothing) | tested | `ItemControl`/`OrbControl`/`Control`/`Outside` lanes stay inside ±0.2 |
+| Box membership (upstream's AABB, not a feet cell) | tested | `Below` (feet one block down) pulled, `Under` (two down) still |
+| Placement facing = toward the placer | tested | four `place_at` placements read back with the wanted `facing`, and the placed facing drives a pull |
+| The sweep covers every entity, not only mobs | tested | `sweep` phase: a dropped item and an experience orb move in the powered run and stay in the unpowered one; `SELFTEST=1` inverts it (FAIL + EXIT:1) |
+| All four carried blocks place and read back | tested | `blocks` phase: `oneway[facing=up]` and `oneway_wall[facing=south]` read back, the movers placed throughout |
+| Unknown content id is refused | tested | `setblock … restrictions:no_such_block` answers `Unknown block type 'restrictions:no_such_block'` (the parsed reply) |
+| The loot tables (four blocks) | tested | `blocks` phase: pickaxe break → 1, bare-hand break → 1 (requiring `requires_tool: false`), vanilla stone → 1 `minecraft:cobblestone` |
+| Every carried recipe (5 shaped) | tested | `tools/craft_recipes.py` reads them out of the delivered `.hmod` and crafts each in a table: id + count, ingredients consumed, grid empty; `SELFTEST=recipe` inverts the first (FAIL + EXIT:1) |
+| `#minecraft:mineable/pickaxe` (the blocks' tool class) | tested | the pickaxe breaks them (the `blocks` phase); a hand break is slower but still completes |
+| `#minecraft:needs_stone_tool` (stone tier) | blocked(no tier gate at the pin) | measured: a **wooden** pickaxe drops the block too. The break path reads only `facts.requires_tool` + `correct_for_drops` (`horizon/crates/horizon-client/src/game.rs:5834,5847`); nothing reads `needs_stone_tool`, so content cannot enforce the tier |
+| One Way: `entityInside` push of +0.2 along the facing | blocked(`entity_inside` needs a block the entity collides with) | the hook exists (`BlockPart::entity_inside`, `EntityWrite::Push`), but the SDK says the `getEntityInsideCollisionShape` that decides "inside" is not exposed (hooks/notes.rs, upstream #44) and `glassential` measured it at this pin; a no-collision content block never fires it |
+| One Way Wall: per-entity collision along `facing` | blocked(no per-entity collision shape) | no API; the block is carried and inert |
+| Glass Boots: player immunity to the push | not ported | the push a player feels is the client half; a player cannot be moved server-side (see Gaps), so the boots have no observable effect here |
+| Advancements, lang, models, blockstates, item models | tested | the items exist and render (the craft phase reads them back by id); the advancement fires on the first craft (`Player… has made the advancement [Stone Age]` is vanilla's; the mod's own are carried data) |
 
 ### To confirm in the next in-game run
 
@@ -270,30 +404,74 @@ sha256sum restrictions.hmod
     ladder's output). `tools/e2e.sh` keeps the scenario and its assertions, now requiring `GAME=`
     and `CTL=` for a launcher-built game.
 
-## Verification
+## Review fixes (2026-11-18)
+
+The reviewer's source review of PR #1181 (`var/review-all/1181-restrictions.md`) left one finding;
+it is fixed in **0.2.1** (`36548 B`, sha256 `8b0a40025b49341cea7e8310f9abc1b2b821a0330f6beb4d0709f88ecbef8dc4`).
+
+- **`src/support.rs:61` — every powered mover enumerated the level's whole entity population and
+  resolved a mob handle for each entity before testing its local ray.** A mover now asks the level
+  for the entities whose box meets its powered run (`LevelRef::entities_in` over `run_bounds`), so
+  the engine's single entity-list walk is filtered by the run and `host.mob` is resolved only for
+  the overlapping handful; the pushes are additionally capped by
+  `runtime::push_budget` (four mobs per powered cell, zero when the signal is off), so one mover's
+  work per tick is bounded by its own run. Test:
+  `runtime::tests::a_mover_pushes_at_most_its_run_s_budget_of_mobs`.
+
+**In-game leg:** `ports/tools/launcher-game.sh run restrictions` → `PASS` + `E2E EXIT:0`, control
+`FAIL: the powered attractor did not pull the cow` + `EXIT:1`, recorded in
+`ports/_shared/evidence/restrictions-e2e/`.
+
+## Verification (0.2.3, slice 2)
 
 Skills: superpowers/using-superpowers, test-driven-development, systematic-debugging, verification-before-completion; BeautifulRust/rust-best-practices
 
+Package: `restrictions.hmod` **37,954 B**, sha256
+`895d8b2058dce2588d7582aebaa81f4d952d42ca4d41899f7ee68a4d88f40e4e`, version **0.2.3**, format
+`native-1/0a875da91dbb0fdcb7ba8c42c11341aa229af51a/e59da9094f0c2fdda6c627fe9eff22dec6a906f0`,
+63 entries, **no packed `Cargo.lock`**. Every log below prints this sha and size in its first line.
+
 | Check | Command | Result |
 |---|---|---|
-| Runtime unit tests (SDK crate) | `CARGO_INCREMENTAL=0 cargo test` | **13 passed**, 0 failed (`evidence/restrictions/sdk-test.log`) |
+| Runtime unit tests (SDK crate) | `CARGO_INCREMENTAL=0 cargo test` | **16 passed**, 0 failed (`evidence/restrictions/sdk-test.log`) |
 | Lints | `cargo clippy --all-targets -- -D warnings` | exit 0, 0 warnings (`evidence/restrictions/sdk-clippy.log`) |
 | Formatting | `cargo fmt --check` | clean (`evidence/restrictions/sdk-fmt.log`) |
-| Package | `cargo horizon-mod build` | `target/horizon-mod/restrictions.hmod`, EXIT 0 (`evidence/restrictions/sdk-build.log`) |
-| Determinism | rebuild after `rm -rf target/horizon-mod Cargo.lock` | same size and sha256 |
-| Registry check | `cargo horizon-mod check restrictions.hmod` | `restrictions 0.2.0 (native-mod, format native-1/0b14f8a/e59da90, for 26.3)`, **35,935 B**, sha256 `657dda40…8addc`, **EXIT 0** (`evidence/restrictions/sdk-check.log`) |
-| What it uses | `cargo horizon-mod check restrictions.hmod --uses` | 139 surface entries (`evidence/restrictions/sdk-uses.json`), EXIT 0 |
-| Fits the pinned build | `cargo horizon-mod fits restrictions.hmod --build nightly` | `0b14f8a  made for`, EXIT 0 (`evidence/restrictions/sdk-fits.log`) |
-| `runtime.rs` untouched | `unzip -p restrictions.hmod src/runtime.rs \| sha256sum` | `ab17fee2…ed35` = the retired file, byte for byte |
-| Package contents | `unzip -l restrictions.hmod` | 63 entries: manifest, `Cargo.toml`, `LICENSE`, `LICENSE-NOTICE.md`, `README.md`, `icon.png`, `src/{lib,runtime,support}.rs`, `uses.json`, 53 content files |
-| `Skills:` line | `python3 ports/tools/check-skills.py --notes ports/restrictions` | see the line above |
+| Package | `cargo horizon-mod build` ×2, `rm -f Cargo.lock` before each | 37,954 B both times, `cmp` byte-identical (`evidence/restrictions/sdk-build.log`) |
+| Registry check | `cargo horizon-mod check restrictions.hmod` | `restrictions 0.2.3 (native-mod, format native-1/0a875da…/e59da90…, for 26.3)`, 37,954 B, EXIT 0 (`evidence/restrictions/sdk-check.log`) |
+| Fits the pinned build | `cargo horizon-mod fits restrictions.hmod --build 0a875da` | `0a875da  made for`, EXIT 0 (`evidence/restrictions/sdk-fits.log`) |
+| Fits a different build | `cargo horizon-mod fits restrictions.hmod --build 0b14f8a` | `0b14f8a  fits`, EXIT 0 (`evidence/restrictions/sdk-fits-other.log`) |
+| Package contents | `unzip -l restrictions.hmod` | 63 entries: manifest, `Cargo.toml`, `LICENSE`, `LICENSE-NOTICE.md`, `README.md`, `icon.png`, `src/{lib,runtime,support}.rs`, `uses.json`, 53 content files; no `Cargo.lock` |
+| In-game leg (package) | `tools/e2e.sh` on the launcher-built game | `PASS` + `EXIT:0` (`evidence/restrictions-e2e/e2e-launcher-0.2.3.log`) |
+| In-game leg (control, same Nightly, no package) | `GAME=$CONTROL_GAME tools/e2e.sh` | `FAIL: the powered attractor did not pull the dropped item` + `EXIT:1` (`…-0.2.3-control.log`) |
+| In-game leg (sweep selftest) | `SELFTEST=1 tools/e2e.sh` | `FAIL: selftest: the item in the powered run is asserted not to move` + `EXIT:1` (`…-0.2.3-selftest.log`) |
+| In-game leg (recipe selftest) | `SELFTEST=recipe tools/e2e.sh` | `FAIL: attractor.json: expected 1 restrictions:glassboots` + `EXIT:1` (`…-0.2.3-selftest-recipe.log`) |
+| Exit-status audit | `python3 ports/tools/check-e2e-logs.py restrictions-e2e --strict` | `logs=5 ok=5 missing-exit=0 bad-exit=0`, exit 0 |
+| Red proof (before the fix) | the sweep phase against the delivered **0.2.1** package (no rebuild) | `FAIL: the powered attractor did not pull the dropped item (before=3.5 min=3.5)` + `EXIT:1` (`…/e2e-red-0.2.1.log`) |
+| `Skills:` line | `python3 ports/tools/check-skills.py --notes ports/restrictions` | the line above |
+| Package gate | `python3 ports/tools/verify-sdk-package.py restrictions` | 1/1 |
 
-### Not re-run in this migration
+### Harness facts this slice cost (still true)
 
-- **The in-game e2e** (trap 15). The 0.1.0 run stands as the behaviour evidence for the same
-  scenario: what changed is the transport of the same tick (a declared block entity type and Parts
-  instead of an injected helper), not the rules, which are byte-identical and tested.
-- **The staged ladder** (`tools/horizon.py stage/check/test/build`) — deleted with the format.
+- **An experience orb has no `id`** in `ctl entities` (mobs and items do), so an orb lane is
+  tracked by the orb nearest its lane's `z`; the type filter needs the full id
+  (`minecraft:experience_orb`) and the JSON `kind` is `orb`, `item`, `mob`.
+- **`ctl screen` hangs headless and a headless client never opens a crafting-table menu**: the
+  recipe phase is a second `--offscreen` launch (the `pocketstorage` pattern). `ctl menu` answers
+  the occupied slots, not a grid.
+- **`ctl break` respawns the drop where the player may already have picked it up**: assert
+  "produced one" by counting the ground *or* the inventory, never one of them.
+- **Vanilla stone drops `minecraft:cobblestone`**, so it is the differential for a loot readout.
+- **A 7-block catch pit kills a cow** (it is then missing and the next lane's nearest-cow lookup
+  aliases another animal): the catch floors are at y=62 now, and `cow_at` is **strict** (within
+  1.5 blocks of the lane's z) so a missing cow fails loudly instead of passing against the wrong
+  one.
+- **The Under lane needs a shaft**: an idle AI cow on a bare 1x1 pillar has strolled off it.
+
+### Not run in the 0.2.0 migration (closed by 0.2.3)
+
+- **The in-game e2e** was not run in the 0.2.0 migration (no launcher on the box then). It **has**
+  been run for 0.2.1/0.2.2 and again, with the whole parity set, for **0.2.3** — see the table above.
+- **The staged ladder** (`tools/horizon.py stage/check/test/build`) stays deleted with the format.
 
 ## History (0.1.0 and earlier)
 
@@ -368,20 +546,24 @@ is on; idle AI cows stroll, so pillars stand over a void; `ctl entities` carries
 
 ## Files
 
-- `horizon-mod.toml` — the only manifest: `id`, `version = "0.2.0"`, `api = "0.2"`,
-  `side = "both"`, `[native]` pinned to `0b14f8a` / `e59da90`.
+- `horizon-mod.toml` — the only manifest: `id`, `version = "0.2.3"`, `api = "0.2"`,
+  `side = "both"`, `[native]` pinned to `0a875da` / `e59da90`.
 - `Cargo.toml` — one crate; the only dependency is `horizon-mod-api` from `.horizon/sdk/`.
 - `src/lib.rs` — `register` (two block entity types, four block parts) and the two parts.
-- `src/runtime.rs` — the pure decision, byte-identical to the pre-migration file, 13 tests.
+- `src/runtime.rs` — the pure decisions (run, impulse, membership, eligibility, budget), 16 tests.
 - `src/support.rs` — the game glue.
 - `assets/`, `data/` — the carried content.
 - `LICENSE`, `LICENSE-NOTICE.md`, `icon.png`, `README.md` — inside the package.
-- `tools/e2e.sh` — the in-game scenario (needs a launcher-built game).
-- `restrictions.hmod` — the delivered package, 35,935 B, sha256
-  `657dda40a99c20bc8b898246f6662def6107113cb9ba7fdc4ae9813e5ea8addc`.
+- `tools/e2e.sh` — the in-game scenario (needs a launcher-built game); `tools/craft_recipes.py`
+  crafts every carried recipe from the delivered package's own JSON.
+- `SLICE-2-PLAN.md` — the slice's plan, written before the first edit.
+- `restrictions.hmod` — the delivered package, **37,954 B**, sha256
+  `895d8b2058dce2588d7582aebaa81f4d952d42ca4d41899f7ee68a4d88f40e4e`, version 0.2.3.
 - `VALIDATION.md`, `REPIN-AUDIT.md` — earlier ladders (retired tooling, kept as history).
-- Evidence: `../_shared/evidence/restrictions/` (`sdk-*.log`, `sdk-uses.json`, `sdk-sha256.txt`,
-  the 0.1.0 e2e logs, and the retired tree under `retired-hnmod-0.1.0/`).
+- Evidence: `../_shared/evidence/restrictions/` (`sdk-*.log` for 0.2.3 with the sha in each,
+  `retired-0.2.1/` and `retired-0.2.2/` for the older runs, the 0.1.0 e2e logs, and the retired
+  tree under `retired-hnmod-0.1.0/`); `../_shared/evidence/restrictions-e2e/` (the 0.2.3 legs, the
+  red leg, and `retired-0.2.1/`/`retired-0.2.2/`).
 
 ## Changelog 0.2.0 — supersedes #877
 
@@ -396,3 +578,31 @@ is on; idle AI cows stroll, so pillars stand over a void; `ctl entities` carries
 > longer dirties the chunk (it writes no block-entity payload). Not yet ported, unchanged: One Way
 > and One Way Wall (no per-entity collision shape at the pin), players and item entities (mob-only
 > slice), and the upward fall-distance reset.
+
+## Changelog 0.2.3
+
+> **0.2.3** is slice 2, at the campaign pin `0a875da` (the 0.2.0–0.2.2 builds were made at
+> `0b14f8a`; the manifest now names the pin and the SDK was refetched for it).
+>
+> - **The movers sweep every entity, not only mobs.** Upstream's `getEntitiesOfClass(Entity.class,
+>   …)` covers dropped stacks, arrows, boats, minecarts and experience orbs; 0.1.0–0.2.2 filtered
+>   with `host.mob`. The tick now reads the level's players once, skips only a player
+>   (`runtime::sweeps` — the host refuses a player's push and its client owns its motion), and
+>   counts only accepted pushes against the run's budget (`ENTITIES_PER_CELL` per powered cell).
+>   Proven in game: a dropped item and an experience orb are pulled by a powered Attractor while an
+>   unpowered one beside it leaves its own pair untouched; `SELFTEST=1` inverts it and fails.
+> - **The two movers' loot tables no longer name `mcjtylib:item_energy`.** That component belongs to
+>   McJtyLib, which this package does not ship and 26.3 does not have, so a real break copied
+>   nothing and the block dropped **nothing**; `loot give` (no block entity in the context) worked,
+>   which hid it. With the modifier gone a break drops one of the block with a pickaxe and one by
+>   hand (the blocks declare `requires_tool: false`), asserted in game against vanilla stone's
+>   `minecraft:cobblestone` as the differential.
+> - **The parity legs** the campaign requires are now in `tools/e2e.sh`: all four blocks placed and
+>   read back, an unknown id refused, the loot tables exercised, and all five carried recipes
+>   crafted from the delivered package's own JSON in a real crafting table (`tools/craft_recipes.py`,
+>   a second `--offscreen` launch because a headless client never opens that menu), with
+>   `SELFTEST=recipe` as the fail-capable run.
+> - Still not ported, unchanged: One Way and One Way Wall (the pin's `entity_inside` fires only for a
+>   block the entity already collides with; One Way Wall needs a per-entity collision shape), the
+>   server-side player push (so Glass Boots has no effect here), and the upward fall-distance reset
+>   — now implementable (`ServerHost::entity_reset_fall_distance` exists at this pin), next slice.

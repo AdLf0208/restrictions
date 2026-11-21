@@ -7,8 +7,11 @@
 // Slice 1: the Attractor and Pusher blocks move entities whose bounding box
 // meets the run in front of the block, `signal` cells deep (0 = off). Each tick
 // adds ±0.1 blocks/tick along the facing (upstream's AABB intersection).
-// One Way / One Way Wall need a no-collision block with a block entity and are
-// deferred (engine gap); players and item entities cannot be moved at the pin.
+// Slice 2 widens the sweep from mobs to every entity the host can push: a
+// dropped stack, an arrow, a boat and an experience orb are moved as the cow is
+// (`runtime::sweeps`); a player is skipped because its own client owns its motion.
+// One Way / One Way Wall need a no-collision block that fires `entity_inside` and
+// are deferred (engine gap).
 
 pub const ATTRACTOR: &str = "restrictions:attractor";
 pub const PUSHER: &str = "restrictions:pusher";
@@ -130,6 +133,34 @@ pub fn run_bounds(pos: [i32; 3], facing: [i32; 3], signal: i32) -> Option<[[f64;
 /// strictly, so boxes that only touch at a face do not.
 pub fn boxes_meet(a: [[f64; 3]; 2], b: [[f64; 3]; 2]) -> bool {
     (0..3).all(|axis| a[0][axis] < b[1][axis] && a[1][axis] > b[0][axis])
+}
+
+/// Entities one mover is willing to push per powered cell of its run.
+///
+/// A run cell is one block; four entities in it is already a pile — a mob, a
+/// dropped stack, an arrow, a boat, an orb, all the same sweep. This is the
+/// per-mover work bound: the level hands the mover only the entities whose box
+/// meets the run (a spatial lookup, [`run_bounds`]), and the pushes are capped
+/// so no arrangement of entities can make one mover touch an unbounded set.
+pub const ENTITIES_PER_CELL: usize = 4;
+
+/// How many entities one mover may push in a tick: [`ENTITIES_PER_CELL`] per
+/// powered cell, zero when the signal is off.
+pub fn push_budget(signal: i32) -> usize {
+    usize::try_from(signal.max(0)).unwrap_or(0) * ENTITIES_PER_CELL
+}
+
+/// Whether a mover sweeps the entity `id` that its run caught.
+///
+/// Upstream swept every `Entity` in the volume — `getEntitiesOfClass(Entity.class, …)`
+/// (`BaseTileEntity.java:70`) is a cow, a dropped stack, an arrow, a boat and an
+/// experience orb alike — and the pin's [`mod_api::EntityRef::push`] moves every
+/// simulated entity as vanilla's `Entity.push` does. The one entity it refuses is a
+/// player, whose motion its own client owns, so a player in the run is skipped
+/// rather than attempted: it must not spend the run's budget, and a later API that
+/// could move a player must not make this port do so by accident.
+pub fn sweeps(id: u32, players: &[u32]) -> bool {
+    !players.contains(&id)
 }
 
 #[cfg(test)]
@@ -275,6 +306,44 @@ mod tests {
         assert_eq!(facing, [0, 0, 1]);
         assert_eq!(impulse(Mover::Pusher, facing), [0.0, 0.0, 0.1]);
         assert_eq!(impulse(Mover::Attractor, facing), [0.0, 0.0, -0.1]);
+    }
+
+    #[test]
+    fn a_mover_sweeps_every_entity_except_a_player() {
+        // Upstream swept every `Entity` in the run — a cow, a dropped stack, an arrow, a boat
+        // and an experience orb alike (`BaseTileEntity.java:70`) — and the pin moves all of
+        // them with `EntityRef::push`. The one entity it refuses is a player, whose motion its
+        // client owns, so a player in the run is skipped and spends none of the run's budget.
+        let players = [41];
+        assert!(!sweeps(41, &players), "a player in the run is skipped");
+        for id in [42, 43, 44, 45, 46] {
+            assert!(sweeps(id, &players), "entity {id} is swept");
+        }
+        assert!(
+            sweeps(41, &[]),
+            "no player in the level leaves nothing to skip"
+        );
+    }
+
+    #[test]
+    fn dropped_items_and_mobs_share_the_run_s_budget() {
+        // The cap is not per kind: a pile of dropped stacks and the mob behind it are one
+        // sweep in the level's order, bounded by the same entities-per-powered-cell rule.
+        assert_eq!(push_budget(3), 3 * ENTITIES_PER_CELL);
+        assert_eq!(push_budget(1), 4, "one powered cell still sweeps a pile");
+        assert_eq!(push_budget(0), 0, "an unpowered mover pushes nothing");
+    }
+
+    #[test]
+    fn a_mover_pushes_at_most_its_run_s_budget_of_entities() {
+        // Work per mover is bounded: a run cell can hold a handful of entities, so four per
+        // powered cell is generous — and a pathological pile cannot turn one mover into an
+        // unbounded loop over the level's population.
+        assert_eq!(push_budget(0), 0, "an unpowered mover pushes nothing");
+        assert_eq!(push_budget(-3), 0, "a negative signal is off");
+        assert_eq!(push_budget(1), 4);
+        assert_eq!(push_budget(15), 60);
+        assert!(push_budget(15) <= ENTITIES_PER_CELL * 15);
     }
 
     #[test]

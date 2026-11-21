@@ -3,8 +3,9 @@
 //! The carried blocks are content in this package (`assets/`, `data/`); the behaviour is here:
 //! each mover owns a block entity (a [Part](mod_api::BlockEntityPart) the game calls only for
 //! those two blocks), reads the facing and the strongest neighbouring redstone level every
-//! server tick, and pushes the mobs whose box meets the powered run in front of it. All four
-//! carried blocks also take the placer's facing on placement.
+//! server tick, and pushes the entities — mobs, dropped stacks, arrows, boats, experience orbs —
+//! whose box meets the powered run in front of it. All four carried blocks also take the placer's
+//! facing on placement.
 //!
 //! The numbers — the run, the impulse, the placement facing, box intersection — are in
 //! [`runtime`], a plain module with no `mod_api` types, so `cargo test` alone proves them.

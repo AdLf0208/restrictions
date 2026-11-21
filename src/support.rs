@@ -1,4 +1,4 @@
-// Game-side glue for Restrictions slice 1 (Attractor/Pusher, mobs only).
+// Game-side glue for Restrictions (Attractor/Pusher, every entity the host can move).
 //
 // The decisions live in `runtime`; this module only reads the game and writes back through the
 // host. It is compiled inside the package's own crate, so it names `mod_api` types freely.
@@ -6,7 +6,8 @@
 use mod_api::{BlockState, HostBlockStates, LevelHost, ServerHost, StateForPlacementEvent};
 
 use crate::runtime::{
-    self, Mover, boxes_meet, cell_of, facing_for_yaw, facing_vector, impulse, run_bounds, volume,
+    self, Mover, boxes_meet, cell_of, facing_for_yaw, facing_vector, impulse, push_budget,
+    run_bounds, volume,
 };
 
 /// `getStateForPlacement`: a placed Restrictions block keeps the placer's horizontal facing, as
@@ -27,12 +28,18 @@ pub(crate) fn state_for_placement(
     Some(Some(state))
 }
 
-/// One server tick of a mover: push every mob whose box meets the powered run in front of it
-/// (upstream's AABB intersection, not a feet cell).
+/// One server tick of a mover: push every entity whose box meets the powered run in front of
+/// it (upstream's AABB intersection, not a feet cell).
 ///
-/// The mob list is the level's whole entity list filtered to mobs, exactly the scope the retired
-/// `native_mobs` helper gave this slice; item entities and players stay out of it (see the gap
-/// list in `notes.md`).
+/// The candidate list is the level's **spatial** answer for the run box
+/// ([`mod_api::LevelRef::entities_in`]): the engine walks its entity lists once and returns only
+/// the entities whose box intersects the run, so resolving a handle happens for the handful that
+/// can be pushed, never for the level's whole population. Upstream sweeps every `Entity`
+/// (`BaseTileEntity.java:70`), so a dropped stack, an arrow, a boat and an experience orb are
+/// moved exactly as a cow is ([`runtime::sweeps`]); the players of the level are read once and
+/// skipped, because the host refuses a player's push. A push the host refuses (a kind it does not
+/// simulate) spends nothing of [`runtime::push_budget`], so a refused candidate never starves the
+/// ones behind it.
 pub(crate) fn on_tick(mover: Mover, host: &mut dyn ServerHost, pos: [i32; 3]) {
     let dimension = host.dimension();
     let Some(level) = host.level(dimension) else {
@@ -56,13 +63,28 @@ pub(crate) fn on_tick(mover: Mover, host: &mut dyn ServerHost, pos: [i32; 3]) {
     let Some(run) = run_bounds(pos, facing, signal) else {
         return;
     };
+    let budget = push_budget(signal);
+    if budget == 0 {
+        return;
+    }
     let push = impulse(mover, facing);
     let cells = volume(pos, facing, signal);
-    let Some(entities) = level.all_entities(&*host) else {
+    let Some(entities) = level.entities_in(&*host, run[0], run[1]) else {
         return;
     };
+    // The level's players, once per tick: the one kind the sweep leaves alone.
+    let players: Vec<u32> = host
+        .players()
+        .server_players()
+        .iter()
+        .map(|player| player.entity().id())
+        .collect();
+    let mut pushed = 0;
     for entity in entities {
-        if host.mob(entity).is_none() {
+        if pushed >= budget {
+            break;
+        }
+        if !runtime::sweeps(entity.id(), &players) {
             continue;
         }
         let met = match entity.bounding_box(&*host) {
@@ -76,6 +98,10 @@ pub(crate) fn on_tick(mover: Mover, host: &mut dyn ServerHost, pos: [i32; 3]) {
             continue;
         }
         // `Entity.push`: an impulse added to the velocity, never a teleport (upstream's call).
-        entity.push(host, push);
+        // The host refuses a player and a kind it does not simulate, and a refusal is free.
+        if !entity.push(host, push) {
+            continue;
+        }
+        pushed += 1;
     }
 }

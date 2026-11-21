@@ -1,7 +1,19 @@
 #!/usr/bin/env bash
-# In-game check for Restrictions slice 1 (Attractor/Pusher, mobs only).
+# In-game check for Restrictions (Attractor/Pusher).
 #
-# In The End at the feet plane y=65:
+# Slice 2 adds the sweep phase first: the movers move **every** entity in the run, not only
+# mobs (upstream's `getEntitiesOfClass(Entity.class, …)`). Two movers stand side by side at
+# z=-6 (powered) and z=-8 (unpowered), each with a dropped stack and an experience orb in its
+# front run; the powered pair must move west and the unpowered pair must not. SELFTEST=1
+# inverts the item assertion.
+#
+# It also proves the content families the parity rule names: every carried block is placed and
+# read back (and an unknown id is refused), the loot table and the `#minecraft:needs_stone_tool`
+# tag are exercised in survival (wood drops nothing, stone drops exactly one), and every carried
+# recipe is crafted from the package's own JSON in a real crafting table (`--offscreen`, because a
+# headless client never opens that menu). SELFTEST=recipe inverts the first recipe's result.
+#
+# Slice 1's lanes (In The End at the feet plane y=65):
 #  - a powered Attractor (facing east) must pull the cow in its front run west
 #    (its x falls by > 0.4 at some point in the window);
 #  - an unpowered Attractor control on a pillar over a void must not move;
@@ -49,6 +61,8 @@ COUNTERFACTUAL=${COUNTERFACTUAL:-0}
 NEGATIVE=${NEGATIVE:-0}
 # SELFTEST=1 keeps the powered run but asserts the attractor did NOT pull, so
 # the run must fail: the counterfactual proving the pull assertion can fail.
+# SELFTEST=recipe runs the normal scenario and makes the recipe check expect the
+# wrong result, so the run must fail at that assertion instead.
 SELFTEST=${SELFTEST:-0}
 # Since the SDK format (0.2.0) the blocks, models and data travel **inside the
 # package**: there is no `--dev-mod` folder and no embedded-content cache to
@@ -71,9 +85,12 @@ mkdir -p "$(dirname "$SOCK")"
 rm -f "$SOCK"
 
 ctl() { "$CTL" --socket "$SOCK" "$@"; }
-cow_at() { # cow_at Z: the cow nearest z=Z (the four lanes are 5 apart)
+cow_at() { # cow_at Z: the only cow within 1.5 blocks of the lane z (lanes are 5 apart)
+    # Strict on purpose: a nearest-cow fallback silently aliases one lane's cow to another's
+    # when the one it was looking for is gone, and the lane then "passes" against the wrong
+    # animal (this cost a run on 2026-11-21: the Under lane reported the Below cow's x).
     ctl entities 40 cow \
-        | jq -r --argjson z "$1" '[.entities[] | select(.type == "minecraft:cow")] | sort_by((.pos[2] - $z) | fabs) | .[0].id'
+        | jq -r --argjson z "$1" '[.entities[] | select(.type == "minecraft:cow") | select((.pos[2] - $z) | fabs < 1.5)] | .[0].id // ""'
 }
 cow_x() { # cow_x ID
     ctl entities 40 cow | jq -r --argjson id "$1" '.entities[] | select(.id == $id) | .pos[0]'
@@ -102,10 +119,13 @@ finish() {
 }
 trap cleanup EXIT
 
+# A headless client never opens a screen, so the crafting-table phase (the last
+# one) relaunches with `--offscreen`; every movement lane keeps `--headless`.
+MODE=${MODE:---headless}
 launch() { # launch WORLD
     rm -f "$SOCK"
     "$CTL" --socket "$SOCK" launch \
-        --game "$GAME" --world "$1" --seed 20261102 --creative --headless --wait \
+        --game "$GAME" --world "$1" --seed 20261102 --creative "$MODE" --wait \
         --resources "$RES" >/dev/null
     ctl wait-ready 120
     ctl command "execute in minecraft:the_end run tp @s 0 65 -6"
@@ -119,12 +139,192 @@ echo "== launch in The End (one package: code and content together) =="
 cd "$SCRATCH"
 launch RestrictionsE2E
 
+echo "== sweep: dropped items and experience orbs, not only mobs (powered z=-6, unpowered z=-8) =="
+# The player must stand clear of both runs and, for the orbs, more than the 8-block
+# attraction radius from them; the entity query radius (40) still covers both lanes.
+ctl command "execute in minecraft:the_end run tp @s 0 65 -13"
+# A powered attractor facing east at 0,65,-6 and an unpowered one at 0,65,-8, each with a
+# floor at y=64 so a dropped stack and an orb rest with their boxes on the run plane (65).
+ctl command "execute in minecraft:the_end run setblock 0 65 -6 restrictions:attractor[facing=east]"
+ctl command "execute in minecraft:the_end run setblock 0 65 -8 restrictions:attractor[facing=east]"
+ctl command "execute in minecraft:the_end run fill 1 64 -6 5 64 -6 minecraft:stone"
+ctl command "execute in minecraft:the_end run fill 1 64 -8 5 64 -8 minecraft:stone"
+ctl command "execute in minecraft:the_end run summon minecraft:item 3.5 65.0 -5.5 {Item:{id:\"minecraft:cobblestone\",count:1},PickupDelay:32767s}"
+ctl command "execute in minecraft:the_end run summon minecraft:item 3.5 65.0 -7.5 {Item:{id:\"minecraft:cobblestone\",count:1},PickupDelay:32767s}"
+ctl command "execute in minecraft:the_end run summon minecraft:experience_orb 5.5 65.0 -5.5 {Value:5s,Count:1b}"
+ctl command "execute in minecraft:the_end run summon minecraft:experience_orb 5.5 65.0 -7.5 {Value:5s,Count:1b}"
+ctl wait 5
+# A dropped stack has an id; an experience orb does not (only mobs and items do), so the
+# orb is tracked as the one nearest its lane's z, where exactly one orb stands.
+item_at() { # item_at Z: the dropped item nearest z=Z
+    ctl entities 40 minecraft:item | jq -r --argjson z "$1" \
+        '[.entities[] | select(.kind == "item")] | sort_by((.pos[2] - $z) | fabs) | .[0].id'
+}
+item_x() { # item_x ID
+    ctl entities 40 minecraft:item | jq -r --argjson id "$1" \
+        '.entities[] | select(.kind == "item" and .id == $id) | .pos[0]'
+}
+orb_x() { # orb_x Z: the x of the experience orb nearest z=Z
+    ctl entities 40 minecraft:experience_orb | jq -r --argjson z "$1" \
+        '[.entities[] | select(.kind == "orb")] | sort_by((.pos[2] - $z) | fabs) | .[0].pos[0]'
+}
+item_id=$(item_at -5.5); need "$item_id" "ItemMe"
+item_ctl_id=$(item_at -7.5); need "$item_ctl_id" "ItemControl"
+before_item=$(item_x "$item_id"); need "$before_item" "ItemMe x"
+before_item_ctl=$(item_x "$item_ctl_id"); need "$before_item_ctl" "ItemControl x"
+before_orb=$(orb_x -5.5); need "$before_orb" "OrbMe x"
+before_orb_ctl=$(orb_x -7.5); need "$before_orb_ctl" "OrbControl x"
+echo "before: ItemMe=$before_item ItemControl=$before_item_ctl OrbMe=$before_orb OrbControl=$before_orb_ctl"
+ctl command "execute in minecraft:the_end run setblock -1 65 -6 minecraft:redstone_block"
+min_item=$before_item; max_item=$before_item
+min_item_ctl=$before_item_ctl; max_item_ctl=$before_item_ctl
+min_orb=$before_orb; max_orb=$before_orb
+min_orb_ctl=$before_orb_ctl; max_orb_ctl=$before_orb_ctl
+for _ in $(seq 1 12); do
+    ctl wait 5
+    ix=$(item_x "$item_id"); icx=$(item_x "$item_ctl_id")
+    ox=$(orb_x -5.5); ocx=$(orb_x -7.5)
+    [ -n "$ix" ] || { echo "FAIL: ItemMe disappeared during the run" >&2; ctl logs --lines 40 >&2; exit 1; }
+    [ -n "$icx" ] || { echo "FAIL: ItemControl disappeared during the run" >&2; ctl logs --lines 40 >&2; exit 1; }
+    [ -n "$ox" ] || { echo "FAIL: OrbMe disappeared during the run" >&2; ctl logs --lines 40 >&2; exit 1; }
+    [ -n "$ocx" ] || { echo "FAIL: OrbControl disappeared during the run" >&2; ctl logs --lines 40 >&2; exit 1; }
+    read -r min_item max_item < <(acc "$min_item" "$max_item" "$ix")
+    read -r min_item_ctl max_item_ctl < <(acc "$min_item_ctl" "$max_item_ctl" "$icx")
+    read -r min_orb max_orb < <(acc "$min_orb" "$max_orb" "$ox")
+    read -r min_orb_ctl max_orb_ctl < <(acc "$min_orb_ctl" "$max_orb_ctl" "$ocx")
+done
+echo "sweep:  ItemMe=${min_item}..${max_item} ItemControl=${min_item_ctl}..${max_item_ctl}"
+echo "sweep:  OrbMe=${min_orb}..${max_orb} OrbControl=${min_orb_ctl}..${max_orb_ctl}"
+if [ "$SELFTEST" = 1 ]; then
+    # The inverted assertion: the powered run's item must be asserted NOT to move, so
+    # this run fails at this line with the values that prove the real assertion bites.
+    awk -v before="$before_item" -v min="$min_item" 'BEGIN { exit !((before - min) < 0.1) }' \
+        || { echo "FAIL: selftest: the item in the powered run is asserted not to move (before=$before_item min=$min_item)" >&2; ctl logs --lines 40 >&2; exit 1; }
+fi
+awk -v before="$before_item" -v min="$min_item" 'BEGIN { exit !((before - min) > 0.4) }' \
+    || { echo "FAIL: the powered attractor did not pull the dropped item (before=$before_item min=$min_item)" >&2; ctl logs --lines 40 >&2; exit 1; }
+awk -v before="$before_orb" -v min="$min_orb" 'BEGIN { exit !((before - min) > 0.4) }' \
+    || { echo "FAIL: the powered attractor did not pull the experience orb (before=$before_orb min=$min_orb)" >&2; ctl logs --lines 40 >&2; exit 1; }
+awk -v before="$before_item_ctl" -v min="$min_item_ctl" -v max="$max_item_ctl" 'BEGIN { exit !((before - min) < 0.2 && (max - before) < 0.2) }' \
+    || { echo "FAIL: the unpowered attractor moved the dropped item (before=$before_item_ctl window=$min_item_ctl..$max_item_ctl)" >&2; ctl logs --lines 40 >&2; exit 1; }
+awk -v before="$before_orb_ctl" -v min="$min_orb_ctl" -v max="$max_orb_ctl" 'BEGIN { exit !((before - min) < 0.2 && (max - before) < 0.2) }' \
+    || { echo "FAIL: the unpowered attractor moved the experience orb (before=$before_orb_ctl window=$min_orb_ctl..$max_orb_ctl)" >&2; ctl logs --lines 40 >&2; exit 1; }
+# Clear the sweep lanes so the cow lanes below start on their own pillars.
+ctl command "execute in minecraft:the_end run kill @e[type=minecraft:item]"
+ctl command "execute in minecraft:the_end run kill @e[type=minecraft:experience_orb]"
+ctl command "execute in minecraft:the_end run setblock -1 65 -6 minecraft:air"
+ctl command "execute in minecraft:the_end run setblock 0 65 -6 minecraft:air"
+ctl command "execute in minecraft:the_end run setblock 0 65 -8 minecraft:air"
+ctl command "execute in minecraft:the_end run fill 1 64 -6 5 64 -6 minecraft:air"
+ctl command "execute in minecraft:the_end run fill 1 64 -8 5 64 -8 minecraft:air"
+ctl command "execute in minecraft:the_end run tp @s 0 65 -6"
+ctl wait 2
+
+echo "== blocks: place and read back every carried block; break in SURVIVAL for the loot table and the stone-tool tag =="
+# Vanilla 26.3 refuses an unknown content id with a chat line, so that assertion reads the
+# parsed reply, not an exit code (`ctl command` answers ok:true either way).
+unknown=$(ctl command "execute in minecraft:the_end run setblock 1 65 -12 restrictions:no_such_block" | jq -r '.chat[0] // ""')
+echo "  unknown id refused with: $unknown"
+case "$unknown" in
+    *"Unknown block type 'restrictions:no_such_block'"*) ;;
+    *) echo "FAIL: an unknown block id was not refused: $unknown" >&2; ctl logs --lines 40 >&2; exit 1;;
+esac
+# The one-way pair is placed and read back (neither has behaviour yet: see notes.md Gaps).
+ctl command "execute in minecraft:the_end run fill 1 63 -14 6 63 -10 minecraft:stone"
+ctl command "execute in minecraft:the_end run fill 1 64 -14 6 68 -10 minecraft:air"
+ctl command "execute in minecraft:the_end run setblock 2 64 -12 restrictions:attractor[facing=east]"
+ctl command "execute in minecraft:the_end run setblock 3 64 -12 restrictions:oneway[facing=up]"
+ctl command "execute in minecraft:the_end run setblock 4 64 -12 restrictions:oneway_wall[facing=south]"
+oneway_state=$(ctl block 3 64 -12 | jq -r '.state // ""')
+wall_state=$(ctl block 4 64 -12 | jq -r '.state // ""')
+echo "  placed: oneway=$oneway_state oneway_wall=$wall_state"
+[ "$oneway_state" = "restrictions:oneway[facing=up]" ] \
+    || { echo "FAIL: oneway read back as '$oneway_state'" >&2; ctl logs --lines 40 >&2; exit 1; }
+[ "$wall_state" = "restrictions:oneway_wall[facing=south]" ] \
+    || { echo "FAIL: oneway_wall read back as '$wall_state'" >&2; ctl logs --lines 40 >&2; exit 1; }
+# The loot table, in survival: a pickaxe break drops exactly one of the block, and so does a
+# bare hand (the blocks declare `requires_tool: false`). The drop is read out of the **inventory**
+# after the player stands on the broken cell, so the assertion does not depend on where the item
+# entity drifted. Vanilla stone broken with the same pickaxe is the differential — it drops
+# `minecraft:cobblestone`, so the readout is not fixed on the port's item. The
+# `#minecraft:needs_stone_tool` data the jar also declares has no tier gate at this pin (a wooden
+# pickaxe drops it too), recorded in the coverage table.
+break_block() { # break_block X Y Z: prints the block left there
+    ctl look-at-block "$1" "$2" "$3" up >/dev/null
+    ctl wait 4 >/dev/null
+    ctl break "$1" "$2" "$3" --timeout 40 >/dev/null \
+        || { echo "FAIL: could not break $1,$2,$3" >&2; ctl logs --lines 40 >&2; exit 1; }
+    ctl wait 5 >/dev/null
+    ctl block "$1" "$2" "$3" | jq -r '.block // ""'
+}
+near_items() { # near_items: the dropped item ids within 12 blocks, for the log
+    ctl entities 12 minecraft:item | jq -c '[.entities[] | .item.item]'
+}
+drop_count() { # drop_count ITEM X Z: how many of ITEM that break produced, wherever it is now
+    # The drop may already be in the inventory (the player stood next to the break) or still on
+    # the ground; both prove the loot table produced it, so count the ground first and fall back
+    # to a pickup on the broken cell.
+    local n
+    n=$(ctl entities 12 minecraft:item | jq --arg i "$1" '[.entities[] | select(.item.item == $i) | .item.count] | add // 0')
+    if [ "${n:-0}" -eq 0 ]; then
+        ctl tp "$2.5" 64 "$3.5" >/dev/null
+        ctl wait 12 >/dev/null
+        n=$(ctl inventory | jq -r --arg i "$1" '.counts[$i] // 0')
+    fi
+    echo "$n"
+}
+ctl command "execute in minecraft:the_end run tp @s 2.5 64 -10"
+ctl command "gamemode survival @s"
+ctl command "clear @s"
+ctl command "give @s minecraft:stone_pickaxe 1"
+ctl wait 3
+ctl select minecraft:stone_pickaxe
+left=$(break_block 2 64 -12)
+echo "  stone pickaxe on the attractor: block=$left items=$(near_items)"
+[ "$left" = "minecraft:air" ] \
+    || { echo "FAIL: the attractor was not broken (block=$left)" >&2; ctl logs --lines 40 >&2; exit 1; }
+made=$(drop_count restrictions:attractor 2 -12)
+echo "  the pickaxe break put $made restrictions:attractor in the inventory (want 1)"
+[ "${made:-0}" -eq 1 ] \
+    || { echo "FAIL: a pickaxe break left $made restrictions:attractor in the inventory, expected 1" >&2; ctl logs --lines 40 >&2; exit 1; }
+ctl command "execute in minecraft:the_end run setblock 2 64 -12 restrictions:pusher[facing=east]"
+ctl command "clear @s"
+ctl wait 3
+left=$(break_block 2 64 -12)
+echo "  bare hand on the pusher: block=$left items=$(near_items)"
+[ "$left" = "minecraft:air" ] \
+    || { echo "FAIL: the pusher was not broken by hand (block=$left)" >&2; ctl logs --lines 40 >&2; exit 1; }
+made=$(drop_count restrictions:pusher 2 -12)
+echo "  the bare-hand break put $made restrictions:pusher in the inventory (want 1)"
+[ "${made:-0}" -eq 1 ] \
+    || { echo "FAIL: a bare-hand break left $made restrictions:pusher in the inventory, expected 1 (requires_tool=false)" >&2; ctl logs --lines 40 >&2; exit 1; }
+ctl command "execute in minecraft:the_end run setblock 5 64 -12 minecraft:stone"
+ctl command "clear @s"
+ctl command "give @s minecraft:stone_pickaxe 1"
+ctl wait 3
+ctl select minecraft:stone_pickaxe
+left=$(break_block 5 64 -12)
+echo "  stone pickaxe on vanilla stone: block=$left items=$(near_items)"
+[ "$left" = "minecraft:air" ] \
+    || { echo "FAIL: the vanilla differential was not broken (block=$left)" >&2; ctl logs --lines 40 >&2; exit 1; }
+made=$(drop_count minecraft:cobblestone 5 -12)
+echo "  the vanilla break put $made minecraft:cobblestone in the inventory (want 1)"
+[ "${made:-0}" -eq 1 ] \
+    || { echo "FAIL: the vanilla differential left $made minecraft:cobblestone, expected 1" >&2; ctl logs --lines 40 >&2; exit 1; }
+ctl command "clear @s"
+ctl command "gamemode creative @s"
+ctl command "execute in minecraft:the_end run kill @e[type=minecraft:item]"
+# Back to the arena: the loot lanes moved the player to z=-12, and `ctl entities` only sees 40
+# blocks around the player (the Under cow is ~35 from the arena centre, ~41 from the loot lanes).
+ctl command "execute in minecraft:the_end run tp @s 0 65 -6"
+ctl wait 2
+
 echo "== attractor facing east at 0,65,0; pusher at 0,65,5; pillars at x=3 (z 0,10) and x=20 (z 16) =="
 # Pull lane: a catch floor only when powered; the pillar stands over it.
 if [ "$COUNTERFACTUAL" = 0 ]; then
-    ctl command "execute in minecraft:the_end run fill 1 58 -2 6 58 2 minecraft:stone"
+    ctl command "execute in minecraft:the_end run fill 1 62 -2 6 62 2 minecraft:stone"
 fi
-ctl command "execute in minecraft:the_end run fill 1 59 -2 6 64 2 minecraft:air"
+ctl command "execute in minecraft:the_end run fill 1 63 -2 6 64 2 minecraft:air"
 ctl command "execute in minecraft:the_end run setblock 3 64 0 minecraft:stone"
 # Control / outside: 1x1 pillars over a deep void (no stroll destination).
 ctl command "execute in minecraft:the_end run fill 1 30 8 6 64 12 minecraft:air"
@@ -140,12 +340,15 @@ ctl command "execute in minecraft:the_end run fill 12 65 2 12 66 8 minecraft:sto
 #  - Below: feet at y=64, one block under the run plane (y=65). The body
 #    reaches into the run, so upstream's AABB intersection must pull it; a
 #    feet-cell test would not. 1x1 pillar over a catch pit, as the pull lane.
-#  - Under: feet at y=63, two blocks down (box tops out at 64.4). Must not move.
-ctl command "execute in minecraft:the_end run fill 1 57 20 6 57 24 minecraft:stone"
-ctl command "execute in minecraft:the_end run fill 1 58 20 6 64 24 minecraft:air"
+#  - Under: feet at y=63, two blocks down (box tops out at 64.4). Must not move, so it
+#    stands in a 1x1 shaft: an idle AI cow on a bare 1x1 pillar has strolled off it.
+ctl command "execute in minecraft:the_end run fill 1 62 20 6 62 24 minecraft:stone"
+ctl command "execute in minecraft:the_end run fill 1 63 20 6 64 24 minecraft:air"
 ctl command "execute in minecraft:the_end run setblock 3 63 22 minecraft:stone"
 ctl command "execute in minecraft:the_end run fill 1 30 26 6 64 30 minecraft:air"
 ctl command "execute in minecraft:the_end run setblock 3 62 28 minecraft:stone"
+ctl command "execute in minecraft:the_end run fill 2 63 27 4 64 29 minecraft:stone"
+ctl command "execute in minecraft:the_end run fill 3 63 28 3 64 28 minecraft:air"
 
 ctl command "execute in minecraft:the_end run setblock 0 65 0 restrictions:attractor[facing=east]"
 ctl command "execute in minecraft:the_end run setblock 0 65 5 restrictions:pusher[facing=east]"
@@ -348,5 +551,33 @@ place_at 6 30 6.5 27.5 north
 place_at 12 30 14.5 30.5 east
 place_at 18 30 15.5 30.5 west
 
+echo "== recipes: every carried recipe crafts against its declared pattern =="
+# The five carried recipes are read out of the delivered package by the helper, so
+# this phase cannot drift from the data the package ships: each pattern is placed in
+# a real crafting table, the result id and count are asserted, and the ingredients
+# must be consumed with the grid left empty. SELFTEST=recipe expects the wrong
+# result and must FAIL (proof the recipe assertion can fail).
+#
+# A headless client never opens a crafting-table menu, so this phase is its own
+# `--offscreen` launch (the pattern `pocketstorage` and `chisel` use).
+ctl quit >/dev/null 2>&1 || true
+rm -f "$SOCK"
+sleep 3
+MODE=--offscreen launch RestrictionsRecipes
+ctl command "execute in minecraft:the_end run fill 13 63 28 17 63 32 minecraft:stone"
+ctl command "execute in minecraft:the_end run fill 13 64 28 17 66 32 minecraft:air"
+ctl command "execute in minecraft:the_end run setblock 14 64 28 minecraft:crafting_table"
+ctl tp 15.5 64 30
+# `ctl interact` clicks where the crosshair points: aim at the table's top face and let a
+# few ticks carry the rotation to the server before the script clicks it.
+ctl look-at-block 14 64 28 up >/dev/null
+ctl wait 6
+if [ "$SELFTEST" = recipe ]; then
+    SELFTEST=1 python3 "$PORT/tools/craft_recipes.py" "$SOCK" "$CTL" 14 64 28 "$PORT/restrictions.hmod"
+else
+    python3 "$PORT/tools/craft_recipes.py" "$SOCK" "$CTL" 14 64 28 "$PORT/restrictions.hmod"
+fi
+ctl command "execute in minecraft:the_end run setblock 14 64 28 minecraft:air"
+
 finish
-echo "PASS: powered attractor pulled, unpowered stayed, pusher pushed away, outside control stayed; the box test pulled the cow one block below the run and left the one two blocks below; placement facings kept and the placed facing drove the pull"
+echo "PASS: the sweep moved a dropped item and an experience orb while the unpowered control stayed; every carried block was placed and read back and an unknown id refused; both mover loot tables dropped one on a pickaxe break and one by hand (counted on the ground or in the inventory) and vanilla stone dropped cobblestone; every carried recipe crafted its declared result and consumed its ingredients; powered attractor pulled, unpowered stayed, pusher pushed away, outside control stayed; the box test pulled the cow one block below the run and left the one two blocks below; placement facings kept and the placed facing drove the pull"

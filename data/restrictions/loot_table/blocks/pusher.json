@@ -4,20 +4,6 @@
       "bonus_rolls": 0.0,
       "entries": [
         {
-          "modifier": [
-            {
-              "source": "block_entity",
-              "type": "minecraft:copy_name"
-            },
-            {
-              "include": [
-                "mcjtylib:item_energy",
-                "minecraft:container"
-              ],
-              "source": "block_entity",
-              "type": "minecraft:copy_components"
-            }
-          ],
           "name": "restrictions:pusher",
           "type": "minecraft:item"
         }
